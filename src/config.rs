@@ -1,4 +1,4 @@
-//! Configuration module for the GitLab Runner Orchestrator.
+//! Configuration module for the Forgejo Runner Orchestrator.
 //!
 //! Loads configuration from `config/config.toml` and provides
 //! typed structs for all settings.
@@ -17,27 +17,28 @@ pub enum ConfigError {
     #[error("Failed to parse configuration: {0}")]
     Parse(#[from] toml::de::Error),
 
-    #[error("Failed to read runner configuration (runner.toml): {0}")]
+    #[error("Failed to read runner credentials (.runner): {0}")]
     RunnerConfig(std::io::Error),
 }
 
 /// Main configuration - contains all sub-configurations.
 #[derive(Debug, Deserialize, Clone)]
 pub struct Config {
-    pub gitlab: GitLabConfig,
+    pub forgejo: ForgejoConfig,
     pub hetzner: HetznerConfig,
     pub runner: RunnerConfig,
 }
 
-/// GitLab-specific configuration.
+/// Forgejo-specific configuration.
 #[derive(Debug, Deserialize, Clone)]
-pub struct GitLabConfig {
-    /// URL of the GitLab instance (e.g., "https://gitlab.example.com")
+pub struct ForgejoConfig {
+    /// URL of the Forgejo instance (e.g., "https://forgejo.example.com")
     pub url: String,
     /// Personal Access Token for API authentication
     pub token: String,
-    /// Optional runner tag filter - only spin up a runner when a pending job has one of these tags.
-    /// If absent, all pending jobs trigger a runner (original behavior).
+    /// Optional runner label filter - only spin up a runner when a waiting task has one of these labels.
+    /// If absent, all waiting tasks trigger a runner (original behavior).
+    /// Note: Forgejo may not expose runner labels via the tasks API — leave unset if unsure.
     pub tag_filter: Option<Vec<String>>,
 }
 
@@ -95,7 +96,7 @@ impl Config {
         let config: Config = toml::from_str(&content)?;
 
         info!("Configuration loaded successfully");
-        info!("  GitLab URL: {}", config.gitlab.url);
+        info!("  Forgejo URL: {}", config.forgejo.url);
         info!("  Hetzner server type: {}", config.hetzner.server_type);
         info!("  Runner name: {}", config.runner.name);
 
@@ -106,16 +107,13 @@ impl Config {
     // as the config path is explicitly defined in main.rs.
 }
 
-/// Loads the contents of runner.toml for cloud-init.
+/// Loads the pre-registered `.runner` credentials file for cloud-init injection.
 ///
 /// # Arguments
-/// * `path` - Path to the runner.toml file
-///
-/// # Returns
-/// The file contents as a string or an error
+/// * `path` - Path to the `.runner` file (e.g., `config/data/.runner`)
 pub fn load_runner_config<P: AsRef<Path>>(path: P) -> Result<String, ConfigError> {
     let path = path.as_ref();
-    info!("Loading runner configuration from: {}", path.display());
+    info!("Loading runner credentials from: {}", path.display());
 
     std::fs::read_to_string(path).map_err(ConfigError::RunnerConfig)
 }

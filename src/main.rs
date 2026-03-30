@@ -1,24 +1,24 @@
-//! GitLab Runner Orchestrator for Hetzner Cloud.
+//! Forgejo Runner Orchestrator for Hetzner Cloud.
 //!
-//! Automatically creates Hetzner servers as GitLab runners when pipelines
-//! are pending and deletes them cost-optimized after completion.
+//! Automatically creates Hetzner servers as Forgejo Actions runners when tasks
+//! are waiting and deletes them cost-optimized after completion.
 //!
 //! # How it works
 //!
-//! 1. Polls the GitLab API for active pipelines (pending/running)
-//! 2. On active pipeline: Create Hetzner server (if not present)
-//! 3. On no active pipelines: Delete server (after minimum runtime)
+//! 1. Polls the Forgejo API for active tasks (waiting/running)
+//! 2. On active task: Create Hetzner server (if not present)
+//! 3. On no active tasks: Delete server (after minimum runtime)
 //! 4. Deletion ideally 5min before next billing cycle
 //!
 //! # Configuration
 //!
-//! Expects `config/config.toml` with GitLab and Hetzner credentials.
-//! Expects `config/runner.toml` with GitLab Runner configuration.
+//! Expects `config/config.toml` with Forgejo and Hetzner credentials.
+//! Expects `config/runner.toml` with Forgejo Runner configuration.
 
 mod cloud_init;
 mod config;
 mod csv_log;
-mod gitlab;
+mod forgejo;
 mod hetzner;
 mod state;
 
@@ -34,7 +34,7 @@ use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, Lay
 use crate::cloud_init::generate_cloud_init;
 use crate::config::{load_runner_config, Config};
 use crate::csv_log::CsvLogger;
-use crate::gitlab::GitLabClient;
+use crate::forgejo::ForgejoClient;
 use crate::hetzner::HetznerClient;
 use crate::state::{OrchestratorState, RunnerState};
 
@@ -44,8 +44,8 @@ const BILLING_BUFFER_MINUTES: u64 = 5;
 /// Default path for configuration.
 const CONFIG_PATH: &str = "config/config.toml";
 
-/// Default path for runner configuration.
-const RUNNER_CONFIG_PATH: &str = "config/runner.toml";
+/// Default path for the pre-registered Forgejo runner credentials.
+const RUNNER_CONFIG_PATH: &str = "config/data/.runner";
 
 /// Default path for persisted state.
 const STATE_PATH: &str = "config/state.json";
@@ -57,17 +57,18 @@ const LOG_DIR: &str = "logs";
 const CONFIG_EXAMPLE_PATH: &str = "config/config.example.toml";
 
 /// Content of the example configuration.
-const CONFIG_EXAMPLE_CONTENT: &str = r#"# GitLab Runner Orchestrator - Example Configuration
+const CONFIG_EXAMPLE_CONTENT: &str = r#"# Forgejo Runner Orchestrator - Example Configuration
 # Copy this file to config.toml and customize the values.
 
-[gitlab]
-# URL of your GitLab instance
-url = "https://gitlab.example.com"
-# Personal Access Token with API access (read_api scope is sufficient)
-token = "glpat-xxxxxxxxxxxxxxxxxxxx"
-# Optional: only spin up a runner when a pending job has one of these tags.
-# Remove or leave empty to react to all pending jobs.
-# tag_filter = ["hetzner", "my-runner-tag"]
+[forgejo]
+# URL of your Forgejo instance
+url = "https://forgejo.example.com"
+# Personal Access Token for API authentication
+token = "your-forgejo-token"
+# Optional: only spin up a runner when a waiting task has one of these labels.
+# Remove or leave empty to react to all waiting tasks.
+# Note: Forgejo may not expose runner labels via the tasks API — leave unset if unsure.
+# tag_filter = ["self-hosted", "my-runner-label"]
 
 [hetzner]
 # Hetzner Cloud API Token
@@ -145,32 +146,32 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    info!("=== GitLab Runner Orchestrator ===");
+    info!("=== Forgejo Runner Orchestrator ===");
     info!("Logs are written to: {}/orchestrator.log", LOG_DIR);
     if is_debug_build() {
-        warn!("DEBUG BUILD: Server will be deleted immediately when no pipelines are active!");
+        warn!("DEBUG BUILD: Server will be deleted immediately when no tasks are active!");
     }
     info!("Starting...");
 
     // Check if config directory exists
     if !Path::new("config").exists() {
         error!("Config directory 'config/' does not exist!");
-        error!("Please create config/config.toml and config/runner.toml");
+        error!("Please create config/config.toml and config/data/.runner");
         std::process::exit(1);
     }
 
     // Load configuration
     let config = Config::load(CONFIG_PATH).context("Error loading configuration")?;
 
-    // Load runner configuration
-    let runner_config =
-        load_runner_config(RUNNER_CONFIG_PATH).context("Error loading runner configuration")?;
+    // Load pre-registered runner credentials
+    let runner_config = load_runner_config(RUNNER_CONFIG_PATH)
+        .context("Error loading runner credentials (.runner)")?;
 
     // Initialize CSV logger
     let csv_logger = CsvLogger::new(LOG_DIR).context("Error initializing CSV logger")?;
 
     // Create API clients
-    let gitlab_client = GitLabClient::new(&config.gitlab);
+    let forgejo_client = ForgejoClient::new(&config.forgejo);
     let hetzner_client = HetznerClient::new(&config.hetzner);
 
     // Generate cloud-init template
@@ -200,7 +201,7 @@ async fn main() -> Result<()> {
     // Main loop
     loop {
         if let Err(e) = orchestration_tick(
-            &gitlab_client,
+            &forgejo_client,
             &hetzner_client,
             &csv_logger,
             &cloud_init,
@@ -287,27 +288,27 @@ async fn verify_state_with_hetzner(
 
 /// One pass of the orchestration logic.
 async fn orchestration_tick(
-    gitlab_client: &GitLabClient,
+    forgejo_client: &ForgejoClient,
     hetzner_client: &HetznerClient,
     csv_logger: &CsvLogger,
     cloud_init: &str,
     config: &Config,
     state: &mut OrchestratorState,
 ) -> Result<()> {
-    // Query GitLab for active jobs (filtered by tag if configured)
-    let active_jobs = gitlab_client
-        .find_active_jobs(config.gitlab.tag_filter.as_deref())
+    // Query Forgejo for active tasks (filtered by label if configured)
+    let active_jobs = forgejo_client
+        .find_active_jobs(config.forgejo.tag_filter.as_deref())
         .await?;
     let has_active = !active_jobs.is_empty();
 
     if has_active {
-        // There are active jobs - ensure server exists
+        // There are active tasks - ensure server exists
         if !state.has_runner() {
             // No server present - create one
             let first_job = &active_jobs[0];
             info!(
-                "Active job found: {} (ID: {}) in {}",
-                first_job.job.status, first_job.job.id, first_job.project.path_with_namespace
+                "Active task found: {} (ID: {}) in {}",
+                first_job.job.status, first_job.job.id, first_job.project.full_name
             );
 
             create_runner(
@@ -316,7 +317,7 @@ async fn orchestration_tick(
                 cloud_init,
                 config,
                 state,
-                &first_job.project.path_with_namespace,
+                &first_job.project.full_name,
                 first_job.job.id,
             )
             .await?;

@@ -119,10 +119,7 @@ impl CsvLogger {
             "{},{},{},{},{},{},{}",
             entry.timestamp.to_rfc3339(),
             entry.event,
-            entry
-                .server_id
-                .map(|id| id.to_string())
-                .unwrap_or_default(),
+            entry.server_id.map(|id| id.to_string()).unwrap_or_default(),
             entry.project.as_deref().unwrap_or(""),
             entry
                 .pipeline_id

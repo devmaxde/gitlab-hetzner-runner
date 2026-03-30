@@ -2,7 +2,7 @@
 name = "gitlab_hcloud"
 version = "0.2.0"
 edition = "2021"
-description = "Automatic Hetzner server provisioning for GitLab CI runners"
+description = "Automatic Hetzner server provisioning for Forgejo Actions runners"
 license = "MIT"
 authors = ["Maximilian Kutschka"]
 

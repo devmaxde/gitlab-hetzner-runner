@@ -256,7 +256,6 @@ impl HetznerClient {
     /// The created server with ID and information
     pub async fn create_server(&self, name: &str, user_data: &str) -> Result<Server, HetznerError> {
         info!("Creating server: {}", name);
-
         // Get SSH key ID
         let ssh_key_id = self.get_ssh_key_id(&self.config.ssh_key_name).await?;
         debug!("SSH Key ID: {}", ssh_key_id);
